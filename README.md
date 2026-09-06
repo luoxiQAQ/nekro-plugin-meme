@@ -30,15 +30,6 @@ cd ${NEKRO_DATA_DIR}/plugins/packages
 git clone https://github.com/luoxiQAQ/nekro-plugin-meme.git nekro_plugin_meme
 ```
 
-### 方式三：内置插件挂载（进阶）
-
-把仓库放到数据目录后，用 docker-compose 只读挂载进容器（容器重建 / 镜像更新都不丢，WebUI 中显示为 [内置]）：
-
-```yaml
-# docker-compose.yml -> nekro_agent.volumes
-- ${NEKRO_DATA_DIR}/patches/nekro_plugin_meme:/app/plugins/builtin/nekro_plugin_meme:ro
-```
-
 ## 部署依赖：meme-generator API
 
 ```bash
