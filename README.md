@@ -19,15 +19,7 @@ Nekro Agent 表情包插件，移植自 Yunzai 的 meme-plugin（admilkjs 改版
 
 ## 安装
 
-### 方式一：WebUI 插件市场
-
-在 Nekro WebUI「插件」页面选择「从 Git 仓库安装」，填入本仓库地址：
-
-```
-https://github.com/luoxiQAQ/nekro-plugin-meme
-```
-
-### 方式二：手动安装
+### 手动安装
 
 ```bash
 cd ${NEKRO_DATA_DIR}/plugins/packages
