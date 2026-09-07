@@ -120,6 +120,37 @@ async def _self_qq() -> Optional[str]:
         return None
 
 
+async def _download_avatar_with_retry(client: MemeClient, qq: str, max_retries: int = 3) -> Optional[bytes]:
+    """下载 QQ 头像，带重试和备用 URL"""
+    import httpx as _httpx
+
+    urls = [
+        _avatar_url(qq),
+        f"https://q2.qlogo.cn/g?b=qq&nk={qq}&s=640",
+        f"https://q.qlogo.cn/g?b=qq&nk={qq}&s=640",
+    ]
+    last_err = None
+    for attempt in range(max_retries):
+        url = urls[attempt % len(urls)]
+        try:
+            return await client.download_image(url)
+        except Exception as e:
+            last_err = e
+            logger.warning(f"[meme] 头像下载第 {attempt + 1} 次失败 (QQ {qq}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5 * (attempt + 1))
+    # 最后尝试用独立的 httpx 客户端直接下载
+    try:
+        async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as hc:
+            resp = await hc.get(_avatar_url(qq))
+            if resp.status_code < 400 and resp.content:
+                return resp.content
+    except Exception as e:
+        logger.warning(f"[meme] 独立客户端下载头像也失败 (QQ {qq}): {e}")
+    logger.warning(f"[meme] 获取 QQ {qq} 头像最终失败: {last_err}")
+    return None
+
+
 async def _resolve_images(_ctx: AgentCtx, user_ids: List[str], image_paths: List[str]) -> List[bytes]:
     """按 Yunzai meme-plugin 规则合成图片列表：@用户的头像在前，消息图片在后
 
@@ -137,10 +168,9 @@ async def _resolve_images(_ctx: AgentCtx, user_ids: List[str], image_paths: List
             if not self_qq:
                 continue
             qq = self_qq
-        try:
-            images.append(await client.download_image(_avatar_url(qq)))
-        except Exception as e:
-            logger.warning(f"[meme] 获取 QQ {qq} 头像失败: {e}")
+        avatar = await _download_avatar_with_retry(client, qq)
+        if avatar:
+            images.append(avatar)
 
     for path in image_paths:
         item = str(path).strip()
@@ -148,7 +178,9 @@ async def _resolve_images(_ctx: AgentCtx, user_ids: List[str], image_paths: List
             continue
         try:
             if item.isdigit() and 5 <= len(item) <= 12:
-                images.append(await client.download_image(_avatar_url(item)))
+                avatar = await _download_avatar_with_retry(client, item)
+                if avatar:
+                    images.append(avatar)
             elif item.startswith(("http://", "https://")):
                 images.append(await client.download_image(item))
             else:
@@ -233,23 +265,109 @@ def _build_args(
 async def _prompt_inject_meme_guide(_ctx: AgentCtx) -> str:
     if not config.PROMPT_GUIDE_ENABLE:
         return ""
-    return (
-        "【表情包能力】你可以生成并发送表情包来表达肢体互动和情绪（抱抱、贴贴、亲亲、拍头、举牌等）。"
-        "在情感合适的时候（安慰、撒娇、得意、调侃、表示喜爱等）主动发一张，聊天会更生动：\n"
-        '- 想抱住对方: await generate_meme("hug", user_ids=["me", 对方的QQ号])  # hug 是你抱对方，第一张图是你自己\n'
-        '- 想贴贴: await generate_meme("rub", user_ids=["me", 对方的QQ号])\n'
-        '- 想亲亲: await generate_meme("kiss", user_ids=["me", 对方的QQ号])\n'
-        '- 只需对方头像的模板: await generate_meme("hold_tight", user_ids=[对方的QQ号])  # 抱紧；类似还有 hug_leg 抱大腿、mengqin 猛亲、petpet 拍头\n'
-        '- 举牌写字: await generate_meme("raise_sign", user_ids=[对方的QQ号], texts=["想写的话"])\n'
-        '- 拿不准有哪些模板: await search_meme("抱") 按关键词搜索，或 await random_meme([对方的QQ号]) 随机来一张\n'
-        "使用要点：\n"
-        "1. 对方的QQ号可从聊天上下文中消息旁边的用户ID获取。\n"
-        '2. user_ids 中的 "me" 代表你自己（机器人）的头像；两个图的模板第一张是动作发出方。\n'
-        "3. generate_meme 会自动把表情包发到当前聊天，不需要再调用 send_image。\n"
-        "4. 不要在回复文本里写 bq 之类的指令词，直接调用方法发图即可；也不要每条消息都用，避免刷屏。\n"
-        "5. 生成失败时按报错提示调整图片/文字数量，或先 search_meme 换个模板。"
-    )
+    prefix = config.COMMAND_FORCE_PREFIX.strip() or "bq"
 
+    # 动态从索引获取常用关键词摘要
+    keyword_summary = ""
+    try:
+        client = _get_client()
+        index = client.peek_index()
+        if index:
+            total = len(index)
+            # 按类别整理常用模板
+            categories = {
+                "互动动作": [],
+                "头像特效": [],
+                "趣味恶搞": [],
+                "文字模板": [],
+            }
+            # 互动类关键词（需要2张图，适合 @对方）
+            interaction_keys = [
+                "hug", "rub", "kiss", "hold_tight", "mengqin", "fencing",
+                "together", "call_110", "daynight", "play_together",
+                "captain", "pepe_raise", "whip", "motivate",
+            ]
+            # 单图特效类
+            effect_keys = [
+                "petpet", "roll", "turn", "bite", "knock", "pound",
+                "throw", "eat", "suck", "pinch", "thump", "smash",
+                "worship", "shock", "garbage", "support", "need",
+                "little_angel", "confuse", "clown", "prpr",
+                "beat_head", "scratch_head", "flash_blind",
+                "trance", "addiction", "bubble_tea",
+            ]
+            # 文字模板类
+            text_keys = [
+                "bronya_holdsign", "ayachi_holdsign", "ba_say",
+                "high_EQ", "luoyonghao_say", "pornhub",
+                "note_for_leave", "fanatic",
+            ]
+            for k in interaction_keys:
+                if k in index:
+                    kws = index[k].get("keywords", [])
+                    if kws:
+                        categories["互动动作"].append(kws[0])
+            for k in effect_keys:
+                if k in index:
+                    kws = index[k].get("keywords", [])
+                    if kws:
+                        categories["头像特效"].append(kws[0])
+            for k in text_keys:
+                if k in index:
+                    kws = index[k].get("keywords", [])
+                    if kws:
+                        categories["文字模板"].append(kws[0])
+
+            lines = [f"后端共有 {total} 个表情包模板，常用的有："]
+            for cat, kws in categories.items():
+                if kws:
+                    lines.append(f"  {cat}: {'、'.join(kws)}")
+            lines.append("  以上仅是冰山一角，用 search_meme(关键词) 可发现更多模板。")
+            keyword_summary = "\n".join(lines)
+    except Exception:
+        keyword_summary = "后端有 800+ 表情包模板，用 search_meme(关键词) 可搜索发现。"
+
+    if not keyword_summary:
+        keyword_summary = "后端有 800+ 表情包模板，用 search_meme(关键词) 可搜索发现。"
+
+    return (
+        "【表情包能力】你可以生成并发送表情包来表达肢体互动和情绪。\n"
+        "在情感合适的时候（安慰、撒娇、得意、调侃、表示喜爱等）主动发一张，聊天会更生动。\n"
+        "\n"
+        f"{keyword_summary}\n"
+        "\n"
+        "【使用流程】\n"
+        "1. 想用表情包时，先确认关键词是否存在：await search_meme(\"你想用的关键词\")\n"
+        "2. 确认模板存在后，调用 send_meme_command 发送：\n"
+        f'   - 互动类（抱/贴/亲/拍等）: await send_meme_command("关键词", 对方QQ号)\n'
+        f'   - 需要文字的模板: await send_meme_command("关键词", 对方QQ号, text="文字内容")\n'
+        f'   - 不需要@人的: await send_meme_command("关键词")\n'
+        "\n"
+        "【常用示例】\n"
+        '- 抱住对方: await send_meme_command("抱", 对方QQ号)\n'
+        '- 贴贴: await send_meme_command("贴", 对方QQ号)\n'
+        '- 亲亲: await send_meme_command("亲", 对方QQ号)\n'
+        '- 摸头: await send_meme_command("摸", 对方QQ号)\n'
+        '- 拍头: await send_meme_command("拍", 对方QQ号)\n'
+        '- 捏: await send_meme_command("捏", 对方QQ号)\n'
+        '- 吃: await send_meme_command("吃", 对方QQ号)\n'
+        '- 舔: await send_meme_command("舔", 对方QQ号)\n'
+        '- 锤: await send_meme_command("锤", 对方QQ号)\n'
+        '- 丢: await send_meme_command("丢", 对方QQ号)\n'
+        '- 精神支柱: await send_meme_command("精神支柱", 对方QQ号)\n'
+        '- 小天使: await send_meme_command("小天使", 对方QQ号)\n'
+        '- 举牌写字: await send_meme_command("举牌", text="想写的话")\n'
+        '- 不确定关键词: 先 await search_meme("想搜的词") 再决定\n'
+        "\n"
+        "【重要规则】\n"
+        "1. 对方的QQ号从聊天上下文中消息旁的用户ID获取。\n"
+        "2. send_meme_command 会先发 bq指令文本 再发图片，全自动处理。\n"
+        "3. 一条消息只调用一次 send_meme_command，不要重复调用！\n"
+        "4. 不要在你的回复文本里写 bq 指令词，交给 send_meme_command。\n"
+        "5. 别每条消息都发表情包，适度使用。\n"
+        '6. 如果用户要求"生成一个表情包"但没指定类型，先用 search_meme 搜索或用 random_meme 随机生成。\n'
+        "7. text 参数只用于模板需要的文字内容（如举牌上要写的话），不要把你的聊天回复放进 text。"
+    )
 
 @plugin.mount_sandbox_method(
     SandboxMethodType.TOOL,
@@ -423,6 +541,186 @@ async def generate_meme(
     if notes:
         result += f"\n注意: {notes}"
     return result
+
+
+
+
+# 防重复调用记录: chat_key -> (keyword, timestamp)
+_meme_dedup: Dict[str, tuple] = {}
+_MEME_DEDUP_WINDOW = 15  # 秒，同一聊天同一关键词在此时间窗口内不重复发送
+
+
+async def _send_msg_direct(chat_key: str, message) -> None:
+    """通过 nonebot bot API 直接发送消息（文本或 Message 对象），绕过沙箱消息合并管线"""
+    import re as _re
+    from nonebot import get_bot
+
+    bot = get_bot()
+    m = _re.match(r"onebot_v11-group_(\d+)", chat_key)
+    if m:
+        group_id = int(m.group(1))
+        await bot.call_api("send_group_msg", group_id=group_id, message=message)
+    else:
+        m = _re.match(r"onebot_v11-private_(\d+)", chat_key)
+        if m:
+            user_id = int(m.group(1))
+            await bot.call_api("send_private_msg", user_id=user_id, message=message)
+        else:
+            raise RuntimeError(f"不支持的 chat_key 格式: {chat_key}")
+
+
+async def _send_image_direct(chat_key: str, image_content: bytes) -> None:
+    """通过 nonebot bot API 直接发送图片，绕过沙盒消息合并管线"""
+    import re as _re
+    from nonebot import get_bot
+    from nonebot.adapters.onebot.v11 import MessageSegment
+
+    bot = get_bot()
+    m = _re.match(r"onebot_v11-group_(\d+)", chat_key)
+    if m:
+        group_id = int(m.group(1))
+        await bot.call_api("send_group_msg", group_id=group_id, message=MessageSegment.image(image_content))
+    else:
+        m = _re.match(r"onebot_v11-private_(\d+)", chat_key)
+        if m:
+            user_id = int(m.group(1))
+            await bot.call_api("send_private_msg", user_id=user_id, message=MessageSegment.image(image_content))
+        else:
+            raise RuntimeError(f"不支持的 chat_key 格式: {chat_key}")
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
+    name="发送表情包指令",
+    description="用 Yunzai 风格发送表情包：先发一条 bq 指令文本，再自动生成并发送对应的表情包图片。推荐 AI 主动发表情包时使用此方法。",
+)
+async def send_meme_command(
+    _ctx: AgentCtx,
+    keyword: str = "抱",
+    target_qq: str = "",
+    text: str = "",
+) -> str:
+    """发送表情包指令（Yunzai 风格）
+
+    先在聊天中发一条"bq关键词 @QQ号"的文本指令，然后自动查找对应的模板、
+    生成表情包图片并直接发送到聊天。效果与 Yunzai meme-plugin 一致。
+
+    Args:
+        keyword: 中文关键词，如 "抱"、"贴"、"亲"、"拍"、"举牌"、"猛亲"、"抱紧" 等
+        target_qq: 目标用户的 QQ 号（可从聊天上下文获取）
+        text: 部分模板需要的文字参数（如举牌内容），不需要时留空
+
+    Returns:
+        str: 执行结果描述
+
+    Example:
+        result = await send_meme_command("抱", "123456")
+        result = await send_meme_command("举牌", "123456", text="晚安")
+    """
+    prefix = config.COMMAND_FORCE_PREFIX.strip() or "bq"
+
+    # 防重复: 同一聊天同一关键词在短时间内不重复发送
+    dedup_key = _ctx.chat_key
+    now = time.time()
+    last = _meme_dedup.get(dedup_key)
+    if last and last[0] == keyword.strip().lower() and now - last[1] < _MEME_DEDUP_WINDOW:
+        logger.info(f"[meme] 跳过重复调用: {keyword} (within {_MEME_DEDUP_WINDOW}s)")
+        return f"表情包已发送，无需重复调用"
+    _meme_dedup[dedup_key] = (keyword.strip().lower(), now)
+
+    client = _get_client()
+    index = await client.get_index()
+
+    kw_lower = keyword.strip().lower()
+    matched_summary = None
+    for summary in index.values():
+        for alias in summary["keywords"] + summary["shortcuts"]:
+            if str(alias).strip().lower() == kw_lower:
+                matched_summary = summary
+                break
+        if matched_summary:
+            break
+
+    if not matched_summary:
+        results = client.search(keyword, 5)
+        if results:
+            for r in results:
+                rkey = r["key"] if isinstance(r, dict) else None
+                if rkey and rkey in index:
+                    matched_summary = index[rkey]
+                    break
+
+    if not matched_summary:
+        raise RuntimeError(
+            f"未找到关键词 '{keyword}' 对应的模板。请用 search_meme('{keyword}') 搜索可用模板。"
+        )
+
+    key = matched_summary["key"]
+
+    target_str = target_qq.strip()
+
+    from nonebot.adapters.onebot.v11 import Message as OBMessage, MessageSegment as OBSeg
+    if text:
+        cmd_msg = OBMessage(OBSeg.text(f"{prefix}{keyword} {text}"))
+    elif target_str:
+        cmd_msg = OBMessage(OBSeg.text(f"{prefix}{keyword} ") + OBSeg.at(int(target_str)))
+    else:
+        cmd_msg = OBMessage(OBSeg.text(f"{prefix}{keyword}"))
+
+    try:
+        await _send_msg_direct(_ctx.chat_key, cmd_msg)
+    except Exception as e:
+        logger.warning(f"[meme] 发送指令文本失败: {e}")
+
+    user_ids_list: List[str] = []
+    if matched_summary["min_images"] >= 2:
+        user_ids_list = ["me", target_str] if target_str else ["me"]
+    elif matched_summary["min_images"] >= 1:
+        user_ids_list = [target_str] if target_str else []
+
+    images = await _resolve_images(_ctx, user_ids_list, [])
+
+    if not images and matched_summary["min_images"] > 0 and _ctx.from_platform_userid:
+        try:
+            images.insert(0, await client.download_image(_avatar_url(str(_ctx.from_platform_userid))))
+        except Exception as e:
+            logger.warning(f"[meme] 获取触发者头像失败: {e}")
+
+    if matched_summary["max_images"] > 0 and len(images) > matched_summary["max_images"]:
+        images = images[: matched_summary["max_images"]]
+
+    texts_list = [text] if text.strip() else []
+    final_texts = _prepare_texts(matched_summary, texts_list)
+
+    try:
+        _check_counts(matched_summary, len(images), len(final_texts))
+    except RuntimeError as e:
+        return f"表情包素材数量不匹配: {e}"
+
+    args_json, notes = _build_args(matched_summary, None, "", "unknown")
+
+    try:
+        img_content = await client.generate(key, images, final_texts, args_json)
+    except MemeAPIError as e:
+        return f"表情包生成失败: {e}"
+
+    try:
+        await _send_image_direct(_ctx.chat_key, img_content)
+    except Exception as e:
+        logger.warning(f"[meme] 直接发送图片失败，回退到 send_image: {e}")
+        sandbox_path = await _ctx.fs.mixed_forward_file(
+            img_content, file_name=f"meme_{key}_{int(time.time())}.png"
+        )
+        try:
+            await _ctx.send_image(sandbox_path)
+        except Exception as e2:
+            return f"表情包生成成功但发送失败: {e2}"
+
+    logger.info(f"[meme] Yunzai 风格表情包发送成功: {keyword} -> {key}")
+    result_msg = f"已发送 {prefix}{keyword} 表情包 [{key}]"
+    if notes:
+        result_msg += f"\n注意: {notes}"
+    return result_msg
 
 
 @plugin.mount_sandbox_method(
