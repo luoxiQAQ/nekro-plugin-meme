@@ -198,8 +198,17 @@ async def _resolve_images(_ctx: AgentCtx, user_ids: List[str], image_paths: List
 def _format_summary(summary: Dict[str, Any]) -> str:
     name = summary["keywords"][0] if summary["keywords"] else summary["key"]
     req = f"图片{summary['min_images']}~{summary['max_images']}张, 文字{summary['min_texts']}~{summary['max_texts']}条"
-    aliases = "/".join(summary["keywords"][:5])
-    return f"[{summary['key']}] {name}（{req}）关键词: {aliases}"
+    aliases = "/".join(summary["keywords"][:8])
+    shortcuts = "/".join(summary["shortcuts"][:5])
+    tags = "/".join(summary["tags"][:4])
+    details = f"关键词: {aliases or '无'}"
+    if shortcuts:
+        details += f"；别名: {shortcuts}"
+    if tags:
+        details += f"；标签: {tags}"
+    if summary["arg_names"]:
+        details += f"；可选参数: {', '.join(summary['arg_names'])}"
+    return f"[{summary['key']}] {name}（{req}）{details}"
 
 
 def _prepare_texts(summary: Dict[str, Any], texts: List[str]) -> List[str]:
@@ -338,37 +347,29 @@ async def _prompt_inject_meme_guide(_ctx: AgentCtx) -> str:
         f"{keyword_summary}\n"
         "\n"
         "【使用流程】\n"
-        "1. 想用表情包时，先确认关键词是否存在：await search_meme(\"你想用的关键词\")\n"
-        "2. 确认模板存在后，调用 send_meme_command 发送：\n"
-        f'   - 互动类（抱/贴/亲/拍等）: await send_meme_command("关键词", 对方QQ号)\n'
-        f'   - 需要文字的模板: await send_meme_command("关键词", 对方QQ号, text="文字内容")\n'
-        f'   - 不需要@人的: await send_meme_command("关键词")\n'
+        "1. 当用户明确要求表情包，或当前语境适合用表情包表达动作/情绪时，必须调用 react_with_meme(intent=...)；不要自己写 Python/PIL 代码，也不要声称插件未挂载。\n"
+        "2. intent 写自然语言语义，例如“温柔地抱抱对方”“安慰一下”“开心庆祝”“调侃一下”，插件会从 800+ 模板中自动选择最合适的图片。\n"
+        "3. 只有用户指定精确模板关键词时，才调用 send_meme_command；需要探索模板时调用 search_meme。\n"
+        f'   - 按语境选择: await react_with_meme("想表达的动作或情绪", 对方QQ号)\n'
+        f'   - 指定文字: await react_with_meme("举牌表达晚安", 对方QQ号, text="晚安")\n'
+        f'   - 精确关键词: await send_meme_command("关键词", 对方QQ号)\n'
         "\n"
         "【常用示例】\n"
-        '- 抱住对方: await send_meme_command("抱", 对方QQ号)\n'
-        '- 贴贴: await send_meme_command("贴", 对方QQ号)\n'
-        '- 亲亲: await send_meme_command("亲", 对方QQ号)\n'
-        '- 摸头: await send_meme_command("摸", 对方QQ号)\n'
-        '- 拍头: await send_meme_command("拍", 对方QQ号)\n'
-        '- 捏: await send_meme_command("捏", 对方QQ号)\n'
-        '- 吃: await send_meme_command("吃", 对方QQ号)\n'
-        '- 舔: await send_meme_command("舔", 对方QQ号)\n'
-        '- 锤: await send_meme_command("锤", 对方QQ号)\n'
-        '- 丢: await send_meme_command("丢", 对方QQ号)\n'
-        '- 精神支柱: await send_meme_command("精神支柱", 对方QQ号)\n'
-        '- 小天使: await send_meme_command("小天使", 对方QQ号)\n'
-        '- 举牌写字: await send_meme_command("举牌", text="想写的话")\n'
-        '- 不确定关键词: 先 await search_meme("想搜的词") 再决定\n'
+        '- 想抱住对方: await react_with_meme("温柔地抱抱对方", 对方QQ号)\n'
+        '- 想贴贴: await react_with_meme("和对方贴贴", 对方QQ号)\n'
+        '- 想亲亲: await react_with_meme("亲亲对方", 对方QQ号)\n'
+        '- 安慰对方: await react_with_meme("安慰对方", 对方QQ号)\n'
+        '- 庆祝开心: await react_with_meme("开心地庆祝", 对方QQ号)\n'
+        '- 举牌写字: await react_with_meme("举牌写晚安", 对方QQ号, text="晚安")\n'
+        '- 不确定模板: 直接把想表达的动作/情绪传给 react_with_meme，不要自己猜模板 key\n'
         "\n"
         "【重要规则】\n"
-        "1. 当用户明确要求生成、发送或使用表情包时，必须调用本插件工具，不要自己编写 Python/PIL 代码替代，也不要声称插件未挂载。\n"
-        "2. 对方的QQ号从聊天上下文中消息旁的用户ID获取。\n"
-        "3. send_meme_command 会先发 bq指令文本再发图片，全自动处理。\n"
-        "4. 一条消息只调用一次 send_meme_command，不要重复调用！\n"
-        "5. 不要在你的回复文本里写 bq 指令词，交给 send_meme_command。\n"
-        "6. 别每条消息都发表情包，适度使用。\n"
-        '7. 如果用户要求"生成一个表情包"但没指定类型，先用 search_meme 搜索或用 random_meme 随机生成。\n'
-        "8. text 参数只用于模板需要的文字内容（如举牌上要写的话），不要把你的聊天回复放进 text。"
+        "1. 对方的QQ号从聊天上下文中消息旁的用户ID获取；没有目标时可省略，插件会用当前用户头像。\n"
+        "2. react_with_meme 会直接发送最终图片，不要再发 bq 指令文本，也不要重复调用。\n"
+        "3. send_meme_command 仅用于用户指定了精确关键词的场景；它会先发 bq 指令文本再发图片。\n"
+        "4. 别每条消息都发表情包，适度使用。\n"
+        '5. 如果用户要求"生成一个表情包"但没指定类型，传“适合当前语境的趣味表情”给 react_with_meme。\n'
+        "6. text 参数只用于模板需要的图片文字，不要把你的聊天回复放进 text。"
     )
 
 @plugin.mount_sandbox_method(
@@ -589,6 +590,164 @@ async def _send_image_direct(chat_key: str, image_content: bytes) -> None:
             await bot.call_api("send_private_msg", user_id=user_id, message=MessageSegment.image(image_content))
         else:
             raise RuntimeError(f"不支持的 chat_key 格式: {chat_key}")
+
+
+def _semantic_candidate_score(summary: Dict[str, Any], intent: str, target_qq: str, text: str) -> Optional[float]:
+    """为自然语言意图挑选可自动生成的模板。分数越高越优先。"""
+    if summary["max_images"] <= 0 or summary["arg_names"]:
+        return None
+    if summary["min_images"] >= 2 and not target_qq:
+        return None
+    if summary["min_texts"] > 0 and not text and not summary["default_texts"]:
+        return None
+    if text and summary["max_texts"] == 0:
+        return None
+
+    intent_lower = intent.strip().lower()
+    searchable = " ".join(
+        [summary["key"], *summary["keywords"], *summary["shortcuts"], *summary["tags"]]
+    ).lower()
+    score = 0.0
+
+    # 语义同义词组：优先选动作明确且稳定的模板 key。
+    semantic_groups = {
+        "hug": ("抱", "拥抱", "抱抱", "抱住", "抱紧", "搂", "hug"),
+        "rub": ("贴", "贴贴", "蹭", "蹭蹭", "依偎", "rub"),
+        "kiss": ("亲", "亲亲", "吻", "亲吻", "kiss"),
+        "petpet": ("摸头", "拍头", "摸摸", "拍一拍", "petpet"),
+        "solace": ("安慰", "难过", "伤心", "哭", "哄", "solace"),
+        "celebrate": ("庆祝", "开心", "高兴", "恭喜", "祝贺", "celebr"),
+        "shock": ("震惊", "惊讶", "吃惊", "shock"),
+        "speechless": ("无语", "无奈", "沉默", "speechless"),
+        "angry": ("生气", "愤怒", "打", "揍", "锤", "punch"),
+        "welcome": ("欢迎", "迎接", "welcome"),
+        "raise": ("举牌", "举起", "写字", "文字", "raise", "sign"),
+    }
+    group_hits = [group for group, words in semantic_groups.items() if any(word in intent_lower for word in words)]
+    for group in group_hits:
+        words = semantic_groups[group]
+        if any(word in searchable for word in words):
+            score += 25.0
+        if group == "hug" and summary["key"] == "hug":
+            score += 20.0
+        elif group == "rub" and summary["key"] == "rub":
+            score += 20.0
+        elif group == "kiss" and summary["key"] == "kiss":
+            score += 20.0
+        elif group == "petpet" and summary["key"] == "petpet":
+            score += 20.0
+        elif group == "solace" and "solace" in summary["key"]:
+            score += 18.0
+        elif group == "shock" and "shock" in summary["key"]:
+            score += 18.0
+        elif group == "speechless" and "speechless" in summary["key"]:
+            score += 18.0
+        elif group == "raise" and ("raise" in summary["key"] or "sign" in summary["key"]):
+            score += 18.0
+
+    # 直接命中意图中的模板别名/标签，优先于仅命中 key 的候选。
+    for alias in summary["keywords"] + summary["shortcuts"] + summary["tags"]:
+        alias_lower = str(alias).lower()
+        if alias_lower and alias_lower in intent_lower:
+            score += 16.0 if alias_lower in summary["keywords"] else 10.0
+    if summary["key"].lower() in intent_lower:
+        score += 18.0
+
+    # 没有明确语义时，优先无文字、单/双头像且无复杂参数的通用互动模板。
+    if not group_hits:
+        score += 2.0
+    if summary["min_texts"] == 0:
+        score += 4.0
+    if summary["min_images"] == 1:
+        score += 2.0
+    if summary["key"] in {"hug", "rub", "kiss", "petpet", "hold_tight"}:
+        score += 3.0
+    return score
+
+
+_semantic_dedup: Dict[str, tuple[str, float]] = {}
+_SEMANTIC_DEDUP_WINDOW = 15
+
+
+def _semantic_dedup_key(intent: str, target_qq: str, text: str) -> str:
+    return "|".join((intent.strip().lower(), target_qq.strip(), text.strip()))
+
+
+@plugin.mount_sandbox_method(
+    SandboxMethodType.TOOL,
+    name="按语境选择并发送表情包",
+    description="根据自然语言动作或情绪自动从 800+ 模板中选择最合适的表情包并直接发送。传入“温柔地抱抱对方”“安慰一下”“开心庆祝”等语义，不要自己猜模板 key。",
+)
+async def react_with_meme(
+    _ctx: AgentCtx,
+    intent: str,
+    target_qq: str = "",
+    text: str = "",
+) -> str:
+    """根据动作/情绪语境自动选择模板并发送表情包。
+
+    Args:
+        intent: 想表达的动作或情绪，例如“温柔地抱抱对方”“安慰一下”“开心庆祝”“调侃一下”
+        target_qq: 目标用户 QQ 号；双人模板会用机器人头像+目标头像
+        text: 模板需要的图片文字，可选
+
+    Returns:
+        str: 已选择的模板和发送结果
+    """
+    if not intent.strip():
+        raise RuntimeError("intent 不能为空，请描述想表达的动作或情绪，例如“抱抱对方”或“安慰一下”。")
+
+    dedup_key = _semantic_dedup_key(intent, target_qq, text)
+    now = time.time()
+    previous = _semantic_dedup.get(_ctx.chat_key)
+    if previous and previous[0] == dedup_key and now - previous[1] < _SEMANTIC_DEDUP_WINDOW:
+        logger.info(f"[meme] 跳过重复语境调用: {intent} (within {_SEMANTIC_DEDUP_WINDOW}s)")
+        return "相同语境的表情包刚刚已经发送，无需重复调用。"
+    _semantic_dedup[_ctx.chat_key] = (dedup_key, now)
+
+    client = _get_client()
+    index = await client.get_index()
+    target = str(target_qq).strip()
+    candidates: List[tuple[float, Dict[str, Any]]] = []
+    for summary in index.values():
+        score = _semantic_candidate_score(summary, intent, target, text.strip())
+        if score is not None:
+            candidates.append((score, summary))
+    candidates.sort(key=lambda item: (-item[0], item[1]["key"]))
+    if not candidates:
+        raise RuntimeError("没有找到能根据当前素材自动生成的模板；请提供 target_qq，或改用 search_meme 搜索模板。")
+
+    last_error: Optional[Exception] = None
+    for score, summary in candidates[:12]:
+        try:
+            user_ids: List[str]
+            if summary["min_images"] >= 2:
+                user_ids = ["me", target]
+            elif summary["min_images"] == 1:
+                user_ids = [target] if target else ["me"]
+            else:
+                user_ids = []
+            images = await _resolve_images(_ctx, user_ids, [])
+            final_texts = _prepare_texts(summary, [text.strip()] if text.strip() else [])
+            _check_counts(summary, len(images), len(final_texts))
+            args_json, _ = _build_args(summary, None, "", "unknown")
+            content = await client.generate(summary["key"], images, final_texts, args_json)
+            sandbox_path = await _ctx.fs.mixed_forward_file(
+                content, file_name=f"meme_{summary['key']}_{int(time.time())}.png"
+            )
+            try:
+                await _ctx.send_image(sandbox_path)
+            except Exception as send_error:
+                logger.warning(f"[meme] 语境表情包发送失败: {send_error}")
+                raise RuntimeError(f"表情包已生成但发送失败: {send_error}") from send_error
+            logger.info(f"[meme] 语境选择成功: intent={intent!r}, key={summary['key']}, score={score:.1f}")
+            display = summary["keywords"][0] if summary["keywords"] else summary["key"]
+            return f"已根据“{intent}”选择「{display}」模板 [{summary['key']}] 并发送表情包。"
+        except Exception as error:
+            last_error = error
+            logger.debug(f"[meme] 语境候选 {summary['key']} 失败，尝试下一候选: {error}")
+
+    raise RuntimeError(f"候选模板均生成失败: {last_error}")
 
 
 @plugin.mount_sandbox_method(
