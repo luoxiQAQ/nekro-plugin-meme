@@ -28,7 +28,8 @@ plugin = NekroPlugin(
     version="1.0.0",
     author="luoxi",
     url="https://github.com/luoxiQAQ/nekro-plugin-meme",
-    support_adapter=["onebot_v11"],
+    # Agent 工具适用于 Web、OneBot 等所有对话适配器；发送由当前上下文处理。
+    support_adapter=[],
 )
 
 
@@ -360,13 +361,14 @@ async def _prompt_inject_meme_guide(_ctx: AgentCtx) -> str:
         '- 不确定关键词: 先 await search_meme("想搜的词") 再决定\n'
         "\n"
         "【重要规则】\n"
-        "1. 对方的QQ号从聊天上下文中消息旁的用户ID获取。\n"
-        "2. send_meme_command 会先发 bq指令文本 再发图片，全自动处理。\n"
-        "3. 一条消息只调用一次 send_meme_command，不要重复调用！\n"
-        "4. 不要在你的回复文本里写 bq 指令词，交给 send_meme_command。\n"
-        "5. 别每条消息都发表情包，适度使用。\n"
-        '6. 如果用户要求"生成一个表情包"但没指定类型，先用 search_meme 搜索或用 random_meme 随机生成。\n'
-        "7. text 参数只用于模板需要的文字内容（如举牌上要写的话），不要把你的聊天回复放进 text。"
+        "1. 当用户明确要求生成、发送或使用表情包时，必须调用本插件工具，不要自己编写 Python/PIL 代码替代，也不要声称插件未挂载。\n"
+        "2. 对方的QQ号从聊天上下文中消息旁的用户ID获取。\n"
+        "3. send_meme_command 会先发 bq指令文本再发图片，全自动处理。\n"
+        "4. 一条消息只调用一次 send_meme_command，不要重复调用！\n"
+        "5. 不要在你的回复文本里写 bq 指令词，交给 send_meme_command。\n"
+        "6. 别每条消息都发表情包，适度使用。\n"
+        '7. 如果用户要求"生成一个表情包"但没指定类型，先用 search_meme 搜索或用 random_meme 随机生成。\n'
+        "8. text 参数只用于模板需要的文字内容（如举牌上要写的话），不要把你的聊天回复放进 text。"
     )
 
 @plugin.mount_sandbox_method(
@@ -668,7 +670,9 @@ async def send_meme_command(
         cmd_msg = OBMessage(OBSeg.text(f"{prefix}{keyword}"))
 
     try:
-        await _send_msg_direct(_ctx.chat_key, cmd_msg)
+        # Yunzai 风格的 bq 文本只适用于 OneBot/QQ；Web 等适配器直接发图片即可。
+        if _ctx.chat_key.startswith("onebot_v11-"):
+            await _send_msg_direct(_ctx.chat_key, cmd_msg)
     except Exception as e:
         logger.warning(f"[meme] 发送指令文本失败: {e}")
 
